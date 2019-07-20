@@ -19,6 +19,7 @@
 </context>
 <context>
     <name>TempoChanges</name>
+    <message>
         <location line="-450"/>
         <source>Creates hidden tempo markers.
 See also: https://musescore.org/en/handbook/3/tempo#ritardando-accelerando</source>
