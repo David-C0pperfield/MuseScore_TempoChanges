@@ -11,18 +11,21 @@ import QtQuick 2.2
 import QtQuick.Controls 1.1
 import QtQuick.Controls.Styles 1.3
 import QtQuick.Layouts 1.1
+import QtQuick.Window 2.2
 import Qt.labs.settings 1.0
 
 import MuseScore 3.0
 
 MuseScore {
       menuPath: "Plugins.TempoChanges"
-      version: "3.1.3"
+      version: "3.4.0"
       description: qsTr("Creates hidden tempo markers.\nSee also: https://musescore.org/en/handbook/3/tempo#ritardando-accelerando")
       pluginType: "dialog"
       requiresScore: true
+      id: 'pluginId'
 
       property int margin: 10
+      property int previousBeatIndex: 5
 
       width:  360
       height: 240
@@ -30,8 +33,10 @@ MuseScore {
       onRun: {
             if ((mscoreMajorVersion == 3) && (mscoreMinorVersion == 0) && (mscoreUpdateVersion < 5)) {
                   console.log(qsTr("Unsupported MuseScore version.\nTempoChanges needs v3.0.5 or above.\n"));
-                  Qt.quit();
+                  pluginId.parent.Window.window.close();
+                  return;
             }
+            prefillSurroundingTempo();
       }
 
       Settings {
@@ -47,6 +52,92 @@ MuseScore {
 //            category: "ui/application"
 //            //property var globalStyle //MS::MuseScoreStyleType - enum doesn't translate to a value in the plugin framework
 //      }
+
+      function prefillSurroundingTempo()
+      {
+            var sel = getSelection();
+            if (sel === null) { //no selection
+                  console.log('No selection');
+                  return;
+            }
+            var beatBaseItem = beatBase.model.get(beatBase.currentIndex);
+            // Start Tempo
+            var foundTempo = undefined;
+            var segment = sel.startSeg;
+            while ((foundTempo === undefined) && (segment)) {
+                  foundTempo = findExistingTempoElement(segment);
+                  segment = segment.prev;
+            }
+            if (foundTempo !== undefined) {
+                  console.log('Found start tempo text = ' + foundTempo.text);
+                  // Try to extract base beat
+                  var targetBeatBaseIndex = findBeatBaseFromMarking(foundTempo);
+                  if (targetBeatBaseIndex != -1) {
+                        // Apply it
+                        previousBeatIndex = targetBeatBaseIndex;
+                        beatBase.currentIndex = targetBeatBaseIndex;
+                        beatBaseItem = beatBase.model.get(targetBeatBaseIndex);
+                  }
+                  // Update input field according to the (detected) beat
+                  startBPMvalue.placeholderText = Math.round(foundTempo.tempo * 60 / beatBaseItem.mult * 10) / 10;
+            }
+            // End Tempo
+            foundTempo = undefined
+            segment = sel.endSeg;
+            while ((foundTempo === undefined) && (segment)) {
+                  foundTempo = findExistingTempoElement(segment);
+                  segment = segment.next;
+            }
+            if (foundTempo !== undefined) {
+                  console.log('Found end tempo text = ' + foundTempo.text);
+                  endBPMvalue.placeholderText = Math.round(foundTempo.tempo * 60 / beatBaseItem.mult * 10) / 10;
+            }
+      }
+
+      /// Analyses tempo marking text to attempt to discover the base beat being used
+      /// If a beat is detected, returns the index in the beatBaseList matching the marking
+      /// @returns -1 if beat is not detected or not present in our beatBaseList
+      function findBeatBaseFromMarking(tempoMarking)
+      {
+            var metronomeMarkIndex = -1;
+            // First look for metronome marking symbols
+            var foundTempoText = tempoMarking.text.replace('<sym>space</sym>', '');
+            var foundMetronomeSymbols = foundTempoText.match(/(<sym>met.*<\/sym>)+/g);
+            if (foundMetronomeSymbols !== null) {
+                  // Locate the index in our dropdown matching the found beatString
+                  for (metronomeMarkIndex = beatBase.model.count; --metronomeMarkIndex >= 0; ) {
+                        if (beatBase.model.get(metronomeMarkIndex).sym == foundMetronomeSymbols[0]) {
+                              break; // Found this marking in the dropdown at metronomeMarkIndex
+                        }
+                  }
+            }
+            else {
+                  // Metronome marking symbols are substituted with their character entity if the text was edited
+                  // UTF-16 range [\uECA0 - \uECB6] (double whole - 1024th)
+                  for (var beatString, charidx = 0; charidx < foundTempoText.length; charidx++) {
+                        beatString = foundTempoText[charidx];
+                        if ((beatString >= "\uECA2") && (beatString <= "\uECA9")) {
+                              // Found base tempo - continue looking for augmentation dots
+                              while (++charidx < foundTempoText.length) {
+                                    if (foundTempoText[charidx] == "\uECB7") {
+                                          beatString += " \uECB7";
+                                    }
+                                    else if (foundTempoText[charidx] != ' ') {
+                                          break; // No longer augmentation dots or spaces
+                                    }
+                              }
+                              // Locate the index in our dropdown matching the found beatString
+                              for (metronomeMarkIndex = beatBase.model.count; --metronomeMarkIndex >= 0; ) {
+                                    if (beatBase.model.get(metronomeMarkIndex).text == beatString) {
+                                          break; // Found this marking in the dropdown at metronomeMarkIndex
+                                    }
+                              }
+                              break; // Done processing base tempo
+                        }
+                  }
+            }
+            return metronomeMarkIndex;
+      }
 
       function applyTempoChanges()
       {
@@ -149,7 +240,9 @@ MuseScore {
             }
             selection = {
                   start: cursor.tick,
-                  end: null
+                  startSeg: cursor.segment,
+                  end: null,
+                  endSeg: null
             };
             cursor.rewind(2); //find end of selection
             if (cursor.tick == 0) {
@@ -158,9 +251,11 @@ MuseScore {
                   // rewind(2) goes behind the last segment (where
                   // there's none) and sets tick=0
                   selection.end = curScore.lastSegment.tick + 1;
+                  selection.endSeg = curScore.lastSegment;
             }
             else {
                   selection.end = cursor.tick;
+                  selection.endSeg = cursor.segment;
             }
             return selection;
       }
@@ -226,6 +321,8 @@ MuseScore {
             anchors.fill: parent
             anchors.margins: 10
             columns: 3
+
+            focus: true
 
             Label {
                   text: qsTranslate("Ms::MuseScore", "Staff Text") + ":"
@@ -326,7 +423,7 @@ MuseScore {
                         //mult is a tempo-multiplier compared to a crotchet      
                         //ListElement { text: '\uECA0';               mult: 8     ; sym: '<sym>metNoteDoubleWhole</sym>' } // 2/1
                         ListElement { text: '\uECA2';               mult: 4     ; sym: '<sym>metNoteWhole</sym>' } // 1/1
-                        //ListElement { text: '\uECA3 \uE1E7 \uE1E7'; mult: 3.5   ; sym: '<sym>metNoteHalfUp</sym><sym>metAugmentationDot</sym><sym>metAugmentationDot</sym>' } // 1/2..
+                        //ListElement { text: '\uECA3 \uECB7 \uECB7'; mult: 3.5   ; sym: '<sym>metNoteHalfUp</sym><sym>metAugmentationDot</sym><sym>metAugmentationDot</sym>' } // 1/2..
                         ListElement { text: '\uECA3 \uECB7';        mult: 3     ; sym: '<sym>metNoteHalfUp</sym><sym>metAugmentationDot</sym>' } // 1/2.
                         ListElement { text: '\uECA3';               mult: 2     ; sym: '<sym>metNoteHalfUp</sym>' } // 1/2
                         ListElement { text: '\uECA5 \uECB7 \uECB7'; mult: 1.75  ; sym: '<sym>metNoteQuarterUp</sym><sym>metAugmentationDot</sym><sym>metAugmentationDot</sym>' } // 1/4..
@@ -348,6 +445,22 @@ MuseScore {
                         font.pointSize: 18
                         padding.top: 5
                         padding.bottom: 5
+                  }
+                  onCurrentIndexChanged: { // update the value fields to match the new beatBase
+                        var changeFactor = beatBase.model.get(currentIndex).mult / beatBase.model.get(previousBeatIndex).mult;
+                        if (startBPMvalue.text == "") {
+                              startBPMvalue.placeholderText = Math.round(getFloatFromInput(startBPMvalue) / changeFactor * 10) / 10;
+                        }
+                        else {
+                              startBPMvalue.text = Math.round(getFloatFromInput(startBPMvalue) / changeFactor * 10) / 10;
+                        }
+                        if (endBPMvalue.text == "") {
+                              endBPMvalue.placeholderText = Math.round(getFloatFromInput(endBPMvalue) / changeFactor * 10) / 10;
+                        }
+                        else {
+                              endBPMvalue.text = Math.round(getFloatFromInput(endBPMvalue) / changeFactor * 10) / 10;
+                        }
+                        previousBeatIndex = currentIndex; // keep track reference for next change
                   }
             }
 
@@ -471,9 +584,21 @@ MuseScore {
                   text: qsTranslate("PrefsDialogBase", "Apply")
                   onClicked: {
                         applyTempoChanges();
-                        Qt.quit();
+                        pluginId.parent.Window.window.close();
                   }
             }
 
+      }
+
+      Keys.onEscapePressed: {
+            pluginId.parent.Window.window.close();
+      }
+      Keys.onReturnPressed: {
+            applyTempoChanges();
+            pluginId.parent.Window.window.close();
+      }
+      Keys.onEnterPressed: {
+            applyTempoChanges();
+            pluginId.parent.Window.window.close();
       }
 }
